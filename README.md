@@ -38,6 +38,13 @@ cd frontend
 npm run build
 ```
 
+落盘规则核验（事务提交、分区互斥、归档、分发阻断等 49 项断言）：
+
+```bash
+cd frontend
+npm run verify-landing
+```
+
 ## 业务模块
 
 | 模块 | 目录 | 业务对象 | 主要字段 |
@@ -61,14 +68,31 @@ npm run build
 | RPA流程 | `rpaflow` | 自动化流程 | 流程编号、目标页面、操作序列 |
 | 登录凭证 | `auth` | 凭证配置 | 凭证编号、目标站点、认证方式 |
 
+## 数据落盘与分发调用链
+
+落盘不只是一张配置表，`frontend/src/data/landing/` 实现了「落盘配置 → 分区文件 → 批次提交 → 保留期归档
+→ 分发清单」的完整链路，独立持久化在 `scraper-config-studio:landing`：
+
+- **分区文件**：按配置的分区策略（按天 / 小时 / 月 / 单桶）推导分区目录，文件先以 `.part` 临时名生成，
+  批次原子提交成功才转正；失败写入回滚全部临时文件，不留半份文件。
+- **分区互斥**：同一分区同一时刻只允许一个批次持锁写入，并发写请求只有一个能进入临界区。
+- **覆写模式**：冲突拒绝直接回滚后来者；整批覆盖以先完成提交的批次为准，旧批次文件下线；追加写入允许并存。
+- **可重试位置**：事务出错 / 提交失败记录 `retryFromSeq`，重试沿原分区从断点序号继续。
+- **保留期归档**：只按批次完成时间 `committedAt` 判断，与页面打开时间无关；归档保留原文件格式与原路径。
+- **策略变更**：分区路径在写入时固定，策略调整只影响新批次，历史文件始终可按原路径回读。
+- **分发阻断**：`distribution.ts` 只读取「已提交 / 已归档」批次的正式文件，写入中、失败、回滚批次
+  （如现场 STOR-61 的 2026-11-13 半分区）不会提前出现在分发清单。
+- **清单与索引**：支持导出 / 导入批次清单、生成 / 上传分区索引文件，用于核对同一批文件。
+
 ## 约定
 
 - 每个模块的页面在 `frontend/src/views/<模块>/index.vue`，页面只负责渲染，读写统一走
-  `frontend/src/api/local-service.ts`。
+  `frontend/src/api/local-service.ts`；落盘链路的读写统一走 `frontend/src/data/landing/`。
 - 字段、状态、动作与流转目标集中在 `frontend/src/data/modules.ts`；示例数据在
-  `frontend/src/data/seed.ts`。
+  `frontend/src/data/seed.ts`，落盘现场数据（含 STOR-61 半分区）在 `frontend/src/data/landing/seed.ts`。
 - 状态流转只允许在 `local-service.ts` 里改，页面组件不做业务判断。
-- 想回到初始数据：清掉浏览器里 `scraper-config-studio:entries` 这一项，或调用 `resetModule(模块)`。
+- 想回到初始数据：清掉浏览器里 `scraper-config-studio:entries` 与 `scraper-config-studio:landing`
+  两项，或调用 `resetModule(模块)` / `resetLandingState()`。
 
 领域：数据工程
 子方向：数据采集、爬虫与RPA
